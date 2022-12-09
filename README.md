@@ -1,5 +1,7 @@
 # Count OSM
 
+Minimal dependency, fast to compile and fast to run OSM entities counter (nodes, ways, relations).
+
 ## Requires
 
 * g++11/clang-13 or higher
