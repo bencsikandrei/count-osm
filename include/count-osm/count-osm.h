@@ -1,6 +1,4 @@
-#pragma once
+#ifndef COUNT_OSM_H__
+#define COUNT_OSM_H__
 
-namespace cosm
-{
-
-} // namespace cosm
+#endif
