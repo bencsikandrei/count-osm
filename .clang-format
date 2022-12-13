@@ -1,3 +1,11 @@
 Language:        Cpp
 BasedOnStyle:  Mozilla
 SortIncludes: CaseInsensitive
+BreakBeforeBraces: Custom
+BraceWrapping:
+  AfterControlStatement: true
+  AfterEnum: true
+  AfterFunction: true
+  AfterStruct: true
+  AfterUnion: true
+  BeforeElse: false

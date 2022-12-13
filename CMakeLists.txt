@@ -6,6 +6,7 @@ set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
 option(COUNT_OSM_UNIT_TESTS "Enable unit tests" OFF)
+option(COUNT_OSM_INTEGRATION_TESTS "Enable integration tests" OFF)
 option(COUNT_OSM_BENCHMARKS "Enable benchmarks" OFF)
 
 if(NOT UNIX) # this include apple
@@ -15,6 +16,7 @@ endif()
 # disable stuff we don't want
 add_compile_options(-fno-rtti)
 add_compile_options(-fno-exceptions)
+add_compile_options(-Wall -Wextra -Werror -Wpedantic)
 
 include(CTest)
 
@@ -31,4 +33,8 @@ endif()
 
 if(COUNT_OSM_BENCHMARKS)
     add_subdirectory(benchmark)
+endif()
+
+if(COUNT_OSM_INTEGRATION_TESTS)
+    add_subdirectory(test/integration)
 endif()
