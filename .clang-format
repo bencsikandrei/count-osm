@@ -1,6 +1,7 @@
-Language:        Cpp
+# requires clang-format 11
+Language:      Cpp
 BasedOnStyle:  Mozilla
-SortIncludes: CaseInsensitive
+SortIncludes:  CaseInsensitive
 BreakBeforeBraces: Custom
 BraceWrapping:
   AfterControlStatement: Always
@@ -9,6 +10,7 @@ BraceWrapping:
   AfterStruct: true
   AfterUnion: true
   BeforeElse: true
+  BeforeLambdaBody: true
   AfterCaseLabel:  true
   AfterClass:      true
   AfterNamespace:  true
