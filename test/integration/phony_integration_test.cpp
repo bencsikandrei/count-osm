@@ -2,8 +2,10 @@
 
 // src
 #include <defer.h>
+#include <numbers.h>
 
 // libc
+#include <cassert>
 #include <cstdint>
 #include <cstdio>
 
@@ -26,6 +28,20 @@ error(const char* what) noexcept
   return 1;
 }
 
+bool
+read_data(const char* begin, [[maybe_unused]] const char* end) noexcept
+{
+  const char* p = begin;
+  // there must be at least one header
+  assert(p + 4 <= end);
+
+  [[maybe_unused]] uint32_t header_size =
+    cosm::unchecked_read_network_uint32(p);
+  p += 4;
+
+  return false;
+}
+
 int
 main(int argc, char** argv)
 {
@@ -38,8 +54,9 @@ main(int argc, char** argv)
   void* mapped_file = nullptr;
   uint64_t mapped_file_size = 0;
 
-  auto defer_unmap =
-    cosm::make_defer([mapped_file, mapped_file_size]() noexcept {
+  auto defer_unmap = cosm::make_defer(
+    [mapped_file, mapped_file_size]() noexcept
+    {
       if (mapped_file)
       {
         munmap(mapped_file, mapped_file_size);
@@ -73,4 +90,13 @@ main(int argc, char** argv)
 
   // we now have a mmaped file
   printf("File size in bytes: %lu\n", mapped_file_size);
+
+  // TODO check if can be const
+  const char* begin = static_cast<const char*>(mapped_file);
+  const char* end = static_cast<const char*>(mapped_file) + mapped_file_size;
+
+  if (!read_data(begin, end))
+  {
+    return error("read_data");
+  }
 }
