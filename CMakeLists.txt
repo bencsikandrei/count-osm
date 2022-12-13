@@ -23,6 +23,7 @@ include(CTest)
 add_library(count-osm INTERFACE include/count-osm/count-osm.h)
 target_include_directories(count-osm INTERFACE
     $<BUILD_INTERFACE:${CMAKE_CURRENT_LIST_DIR}/include>
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_LIST_DIR}/src>
     $<INSTALL_INTERFACE:include>)
 add_library(count-osm::count-osm ALIAS count-osm)
 

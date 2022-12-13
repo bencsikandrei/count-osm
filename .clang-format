@@ -3,9 +3,13 @@ BasedOnStyle:  Mozilla
 SortIncludes: CaseInsensitive
 BreakBeforeBraces: Custom
 BraceWrapping:
-  AfterControlStatement: true
+  AfterControlStatement: Always
   AfterEnum: true
   AfterFunction: true
   AfterStruct: true
   AfterUnion: true
-  BeforeElse: false
+  BeforeElse: true
+  AfterCaseLabel:  true
+  AfterClass:      true
+  AfterNamespace:  true
+  AfterExternBlock: true
