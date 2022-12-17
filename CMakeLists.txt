@@ -27,6 +27,9 @@ target_include_directories(count-osm INTERFACE
     $<INSTALL_INTERFACE:include>)
 add_library(count-osm::count-osm ALIAS count-osm)
 
+add_executable(count-osm-app src/main.cpp)
+target_link_libraries(count-osm-app count-osm)
+
 if(COUNT_OSM_UNIT_TESTS)
     enable_testing()
     add_subdirectory(test/unit)
