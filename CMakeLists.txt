@@ -16,7 +16,9 @@ endif()
 # disable stuff we don't want
 add_compile_options(-fno-rtti)
 add_compile_options(-fno-exceptions)
-add_compile_options(-Wall -Wextra -Werror -Wpedantic)
+add_compile_options(-Wall -Wextra -Wpedantic)
+add_compile_options(-march=native)
+# add_compile_options(-Werror )
 
 include(CTest)
 
@@ -26,6 +28,8 @@ target_include_directories(count-osm INTERFACE
     $<BUILD_INTERFACE:${CMAKE_CURRENT_LIST_DIR}/src>
     $<INSTALL_INTERFACE:include>)
 add_library(count-osm::count-osm ALIAS count-osm)
+
+# deps
 
 if(COUNT_OSM_UNIT_TESTS)
     enable_testing()
