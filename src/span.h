@@ -55,7 +55,7 @@ static_assert(sizeof(span_fixed_size<int, 4>) == sizeof(void*));
 template<typename T>
 struct span
 {
-  using size_type = unsigned long long;
+  using size_type = unsigned long;
   using value_type = T;
 
   constexpr span() = default;

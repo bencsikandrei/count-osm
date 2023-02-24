@@ -458,9 +458,8 @@ decode_header_blob(cosm::span<const char> blob_data,
                    pbf_blob* __restrict__ blob) noexcept
 {
   const char* b = blob_data.begin();
-  const char* e = blob_data.end();
   iterate_fields(&b,
-                 e,
+                 blob_data.end(),
                  [blob](pbf_field& field) -> bool
                  {
                    constexpr uint32_t blob_raw = 1;
@@ -503,7 +502,47 @@ struct Counter
   size_t relations = 0;
 };
 
-static bool
+enum class read_data_status
+{
+  ok = 0,
+  e_decode_file_header,
+  e_decode_header_blob,
+  e_decompress_create,
+  e_buffer_allocation,
+  e_decode_data_file_header,
+  e_decode_data_header_blob,
+  e_decompress_data_blob,
+  e_decompress_unuexpected_size
+};
+
+constexpr const char*
+read_data_status_string(read_data_status sts) noexcept
+{
+  switch (sts)
+  {
+    case read_data_status::ok:
+      return "ok";
+    case read_data_status::e_decode_file_header:
+      return "e_decode_file_header";
+    case read_data_status::e_decode_header_blob:
+      return "e_decode_header_blob";
+    case read_data_status::e_decompress_create:
+      return "e_decompress_create";
+    case read_data_status::e_buffer_allocation:
+      return "e_buffer_allocation";
+    case read_data_status::e_decode_data_file_header:
+      return "e_decode_data_file_header";
+    case read_data_status::e_decode_data_header_blob:
+      return "e_decode_data_header_blob";
+    case read_data_status::e_decompress_data_blob:
+      return "e_decompress_data_blob";
+    case read_data_status::e_decompress_unuexpected_size:
+      return "e_decompress_unuexpected_size";
+  }
+  return "unknown error!";
+}
+
+static read_data_status
 read_data(Counter* counter, cosm::span<char> file) noexcept
 {
   const char* p = file.data();
@@ -522,13 +561,13 @@ read_data(Counter* counter, cosm::span<char> file) noexcept
   int32_t next_blob_size = 0;
   if (!decode_file_header({ p, header_size }, &next_blob_type, &next_blob_size))
   {
-    return false;
+    return read_data_status::e_decode_file_header;
   }
 
   pbf_blob blob;
   if (!decode_header_blob({ p, static_cast<uint64_t>(next_blob_size) }, &blob))
   {
-    return false;
+    return read_data_status::e_decode_header_blob;
   }
 
   p += (header_size + next_blob_size);
@@ -540,13 +579,16 @@ read_data(Counter* counter, cosm::span<char> file) noexcept
   libdeflate_decompressor* dec = libdeflate_alloc_decompressor();
   if (!dec)
   {
-    puts("E: can't allocate zlib decompressor");
-    return false;
+    return read_data_status::e_decompress_create;
   }
   auto free_decompressor =
     cosm::make_defer([dec]() noexcept { libdeflate_free_decompressor(dec); });
 
-  char* buffer_out = static_cast<char*>(malloc(2 * 1'024 * 1'024));
+  char* buffer_out = static_cast<char*>(aligned_alloc(64, 8 * 1'024 * 1'024));
+  if (!buffer_out)
+  {
+    return read_data_status::e_buffer_allocation;
+  }
   auto free_buffer_out =
     cosm::make_defer([buffer_out]() noexcept { free(buffer_out); });
 
@@ -558,38 +600,43 @@ read_data(Counter* counter, cosm::span<char> file) noexcept
     if (!decode_file_header(
           { p, header_size }, &next_blob_type, &next_blob_size))
     {
-      return false;
+      return read_data_status::e_decode_data_file_header;
     }
 
     if (!decode_header_blob({ p, static_cast<uint64_t>(next_blob_size) },
                             &blob))
     {
-      return false;
+      return read_data_status::e_decode_data_header_blob;
     }
 
     p += (header_size + next_blob_size);
-    size_t actual_decompressed_size = 0;
-    libdeflate_result res =
-      libdeflate_zlib_decompress(dec,
-                                 blob.data.data(),
-                                 blob.data.size(),
-                                 buffer_out,
-                                 2 * 1'204 * 1'024,
-                                 &actual_decompressed_size);
 
-    if (res != libdeflate_result::LIBDEFLATE_SUCCESS)
-    {
-      return false;
-    }
+    const char* actual_data = reinterpret_cast<const char*>(blob.data.data());
+    size_t actual_data_size = blob.data.size();
 
-    if (blob.raw_size && blob.raw_size != actual_decompressed_size)
+    if (blob.compression_type == pbf_blob::compression::zlib)
     {
-      return false;
+      size_t actual_decompressed_size = blob.raw_size;
+      libdeflate_result res =
+        libdeflate_zlib_decompress(dec,
+                                   blob.data.data(),
+                                   blob.data.size(),
+                                   buffer_out,
+                                   blob.raw_size,
+                                   &actual_decompressed_size);
+
+      if (res != libdeflate_result::LIBDEFLATE_SUCCESS)
+      {
+        return read_data_status::e_decompress_data_blob;
+      }
+
+      actual_data = buffer_out;
+      actual_data_size = actual_decompressed_size;
     }
 
     // we now have a PrimitiveBlock inside buffer_out
     decode_primitive_block(
-      { buffer_out, actual_decompressed_size },
+      { actual_data, actual_data_size },
       [counter](cosm::span<const char> primitive_groups)
       {
         // we have a repeated PrimitiveGroup inside
@@ -616,7 +663,7 @@ read_data(Counter* counter, cosm::span<char> file) noexcept
       });
   }
 
-  return true;
+  return read_data_status::ok;
 }
 
 // we only allocate memory once, for the whole program, then we use this
@@ -743,16 +790,22 @@ main(int argc, char** argv)
   }
 
   Counter counter;
-  if (!read_data(&counter,
-                 cosm::span<char>(
-                   reinterpret_cast<char*>(global_mapped_file_memory.data()),
-                   global_mapped_file_memory.m_size)))
+  if (const read_data_status sts =
+        read_data(&counter,
+                  cosm::span<char>(
+                    reinterpret_cast<char*>(global_mapped_file_memory.data()),
+                    global_mapped_file_memory.m_size));
+      sts != read_data_status::ok)
   {
+    printf("E: %s\n", read_data_status_string(sts));
     return error("read_data");
   }
 
   puts("Stats:");
   // we now have a mmaped file
   printf("File size in bytes: %lu\n", mapped_file_size);
-  printf("Nodes: %lu\nWays: %lu\nRelations: %lu\n", counter.nodes, counter.ways, counter.relations);
+  printf("Nodes: %lu\nWays: %lu\nRelations: %lu\n",
+         counter.nodes,
+         counter.ways,
+         counter.relations);
 }
