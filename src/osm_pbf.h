@@ -52,7 +52,7 @@ struct pbf_blob
    */
   enum class compression : uint32_t
   {
-    none,
+    none = 0,
     zlib
   };
   compression compression_type = compression::none;
