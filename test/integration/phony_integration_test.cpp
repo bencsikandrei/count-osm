@@ -4,6 +4,7 @@
 #include <branch_hints.h>
 #include <defer.h>
 #include <numbers.h>
+#include <protobuf.h>
 #include <span.h>
 
 // third party
@@ -65,55 +66,30 @@ error(const char* what) noexcept
   return 1;
 }
 
-static constexpr uint32_t
-protobuf_key(uint32_t field_number, uint8_t wire_type) noexcept
-{
-  constexpr uint8_t bits_for_wire_type = 3u;
-  constexpr uint8_t mask_for_wire_type = ~(0xFFu << bits_for_wire_type) & 0xFFu;
-  return (field_number << bits_for_wire_type) |
-         (wire_type & mask_for_wire_type);
-}
-
-static constexpr uint32_t
-protobuf_wire_type(uint32_t key) noexcept
-{
-  return key & 0x07u;
-}
-
-static constexpr uint32_t
-protobuf_field_number(uint32_t key) noexcept
-{
-  return key >> 3;
-}
-
-enum pbf_wt : uint32_t
-{
-  pbf_wt_varint = 0,
-  pbf_wt_64 = 1,
-  pbf_wt_length_delim = 2,
-  pbf_wt_unused1,
-  pbf_wt_unused2,
-  pbf_wt_32 = 5,
-  pbf_wt_unused3,
-  pbf_wt_unused4
-};
-
 struct pbf_field
 {
+  union VarintOrLenDelim
+  {
+    constexpr VarintOrLenDelim() noexcept
+      : varint(0)
+    {
+    }
+    uint64_t varint = 0;
+    cosm::span<const char> length_delim;
+  };
+
   uint32_t key = 0; // field and wt
   // pad 4 bytes
-  uint64_t varint = 0;
-  const uint8_t* pointer = nullptr;
-  uint64_t len = 0;
+  VarintOrLenDelim data;
 
-  constexpr pbf_wt wire_type() const noexcept
+  constexpr cosm::pbf_wt wire_type() const noexcept
   {
-    return static_cast<pbf_wt>(protobuf_wire_type(key));
+    return static_cast<cosm::pbf_wt>(cosm::protobuf_wire_type(key));
   }
 
   constexpr uint32_t field_number() const noexcept
   {
-    return protobuf_field_number(key);
+    return cosm::protobuf_field_number(key);
   }
 };
 
@@ -131,35 +107,27 @@ read_field(pbf_field* __restrict__ field,
   }
 
   field->key = decoded.value;
-  field->pointer = reinterpret_cast<const uint8_t*>(*begin);
 
   switch (field->wire_type())
   {
-    case pbf_wt::pbf_wt_varint:
+    case cosm::pbf_wt::pbf_wt_varint:
       decoded = cosm::decode_varint_u64(begin, end);
       if (decoded.sts != cosm::varint_status::ok)
       {
         return false;
       }
-      field->varint = decoded.value;
+      field->data.varint = decoded.value;
       break;
-    case pbf_wt::pbf_wt_64:
-      field->len = 8;
-      *begin += field->len;
-      break;
-    case pbf_wt::pbf_wt_length_delim:
+    case cosm::pbf_wt::pbf_wt_length_delim:
       decoded = cosm::decode_varint_u64(begin, end);
       if (decoded.sts != cosm::varint_status::ok)
       {
         return false;
       }
-      field->pointer = reinterpret_cast<const uint8_t*>(*begin);
-      field->len = decoded.value;
-      *begin += field->len;
-      break;
-    case pbf_wt::pbf_wt_32:
-      field->len = 4;
-      *begin += field->len;
+      field->data.length_delim =
+        cosm::span<const char>{ reinterpret_cast<const char*>(*begin),
+                                decoded.value };
+      *begin += field->data.length_delim.size();
       break;
     default:
       // we don't care about these, if they appear we could process them
@@ -203,10 +171,10 @@ iterate_fields(const char** begin, const char* end, Callback&& cb) noexcept
 // }
 
 static constexpr uint32_t
-KEY_F_WT(uint32_t field_number, uint8_t wire_type)
+KEY_F_WT(uint32_t field_number, char wire_type)
 {
-  constexpr uint8_t k_bits_for_wt = 3u;
-  constexpr uint8_t k_mask_for_wt = 0b111u;
+  constexpr char k_bits_for_wt = 3u;
+  constexpr char k_mask_for_wt = 0b111u;
 
   return (field_number << k_bits_for_wt) | (wire_type & k_mask_for_wt);
 }
@@ -218,26 +186,25 @@ decode_file_header(cosm::span<const char> header,
 {
   const char* b = header.begin();
   const char* e = header.end();
-  iterate_fields(
-    &b,
-    e,
-    [type, size](pbf_field& field) -> bool
-    {
-      constexpr uint32_t blob_header_type = 1;
-      constexpr uint32_t blob_header_datasize = 3;
-      switch (field.key)
-      {
-        case KEY_F_WT(blob_header_type, pbf_wt_length_delim):
-          *type = { reinterpret_cast<const char*>(field.pointer), field.len };
-          break;
-        case KEY_F_WT(blob_header_datasize, pbf_wt_varint):
-          *size = field.varint;
-          break;
-        default:
-          break;
-      }
-      return true;
-    });
+  iterate_fields(&b,
+                 e,
+                 [type, size](pbf_field& field) -> bool
+                 {
+                   constexpr uint32_t blob_header_type = 1;
+                   constexpr uint32_t blob_header_datasize = 3;
+                   switch (field.key)
+                   {
+                     case KEY_F_WT(blob_header_type, cosm::pbf_wt_length_delim):
+                       *type = field.data.length_delim;
+                       break;
+                     case KEY_F_WT(blob_header_datasize, cosm::pbf_wt_varint):
+                       *size = field.data.varint;
+                       break;
+                     default:
+                       break;
+                   }
+                   return true;
+                 });
 
   return true;
 }
@@ -308,7 +275,7 @@ count_relations(size_t* relations_count, cosm::span<const char> relations)
                    static constexpr uint32_t relation_id = 1;
                    switch (field.key)
                    {
-                     case KEY_F_WT(relation_id, pbf_wt_varint):
+                     case KEY_F_WT(relation_id, cosm::pbf_wt_varint):
                        ++(*relations_count);
                        break;
                      default:
@@ -330,7 +297,7 @@ count_ways(size_t* ways_count, cosm::span<const char> ways)
                    static constexpr uint32_t way_id = 1;
                    switch (field.key)
                    {
-                     case KEY_F_WT(way_id, pbf_wt_varint):
+                     case KEY_F_WT(way_id, cosm::pbf_wt_varint):
                        ++(*ways_count);
                        break;
                      default:
@@ -345,26 +312,24 @@ static bool
 count_dense_nodes(size_t* nodes_count, cosm::span<const char> dense_nodes)
 {
   const char* b = dense_nodes.begin();
-  iterate_fields(
-    &b,
-    dense_nodes.end(),
-    [nodes_count](pbf_field& field) -> bool
-    {
-      // static constexpr uint32_t primitivegroup_nodes = 1; // TODO
-      static constexpr uint32_t dense_nodes_id = 1;
-      switch (field.key)
-      {
-        case KEY_F_WT(dense_nodes_id, pbf_wt_length_delim):
-
-          *nodes_count += fast_count_dense_ids(
-            { reinterpret_cast<const char*>(field.pointer), field.len });
-
-          break;
-        default:
-          break;
-      }
-      return true;
-    });
+  iterate_fields(&b,
+                 dense_nodes.end(),
+                 [nodes_count](pbf_field& field) -> bool
+                 {
+                   // static constexpr uint32_t primitivegroup_nodes = 1; //
+                   // TODO
+                   static constexpr uint32_t dense_nodes_id = 1;
+                   switch (field.key)
+                   {
+                     case KEY_F_WT(dense_nodes_id, cosm::pbf_wt_length_delim):
+                       *nodes_count +=
+                         fast_count_dense_ids(field.data.length_delim);
+                       break;
+                     default:
+                       break;
+                   }
+                   return true;
+                 });
 
   return true;
 }
@@ -386,17 +351,14 @@ decode_primitive_groups(cosm::span<const char> primitive_groups, Callback&& cb)
       static constexpr uint32_t primitivegroup_relations = 4;
       switch (field.key)
       {
-        case KEY_F_WT(primitivegroup_dense_nodes, pbf_wt_length_delim):
-          cb(entity_state::nodes,
-             { reinterpret_cast<const char*>(field.pointer), field.len });
+        case KEY_F_WT(primitivegroup_dense_nodes, cosm::pbf_wt_length_delim):
+          cb(entity_state::nodes, field.data.length_delim);
           break;
-        case KEY_F_WT(primitivegroup_ways, pbf_wt_length_delim):
-          cb(entity_state::ways,
-             { reinterpret_cast<const char*>(field.pointer), field.len });
+        case KEY_F_WT(primitivegroup_ways, cosm::pbf_wt_length_delim):
+          cb(entity_state::ways, field.data.length_delim);
           break;
-        case KEY_F_WT(primitivegroup_relations, pbf_wt_length_delim):
-          cb(entity_state::relations,
-             { reinterpret_cast<const char*>(field.pointer), field.len });
+        case KEY_F_WT(primitivegroup_relations, cosm::pbf_wt_length_delim):
+          cb(entity_state::relations, field.data.length_delim);
           break;
         default:
           break;
@@ -414,32 +376,25 @@ decode_primitive_block(cosm::span<const char> primitive_block,
 {
   const char* b = primitive_block.begin();
   const char* e = primitive_block.end();
-  iterate_fields(
-    &b,
-    e,
-    [&cb](pbf_field& field) -> bool
-    {
-      static constexpr uint32_t primitiveblock_primitivegroup = 2;
-      switch (field.key)
-      {
-        case KEY_F_WT(primitiveblock_primitivegroup, pbf_wt_length_delim):
-          cb({ reinterpret_cast<const char*>(field.pointer), field.len });
-          break;
-        default:
-          break;
-      }
-      return true;
-    });
+  iterate_fields(&b,
+                 e,
+                 [&cb](pbf_field& field) -> bool
+                 {
+                   static constexpr uint32_t primitiveblock_primitivegroup = 2;
+                   switch (field.key)
+                   {
+                     case KEY_F_WT(primitiveblock_primitivegroup,
+                                   cosm::pbf_wt_length_delim):
+                       cb(field.data.length_delim);
+                       break;
+                     default:
+                       break;
+                   }
+                   return true;
+                 });
 
   return true;
 }
-
-struct pbf_metadata
-{
-  uint64_t replication_timestamp;
-  uint64_t replication_sequence_no;
-  char replication_base_url[256];
-};
 
 struct pbf_blob
 {
@@ -447,14 +402,11 @@ struct pbf_blob
   {
     none,
     zlib
-    // lzma,
-    // lz4,
-    // zstd
   };
   compression compression_type = compression::none;
   // when no compression, equal to data.size()
   uint32_t raw_size = 0;
-  cosm::span<const uint8_t> data;
+  cosm::span<const char> data;
 };
 
 static bool
@@ -472,16 +424,17 @@ decode_header_blob(cosm::span<const char> blob_data,
                    // do we care about the others? anyone implement those?
                    switch (field.key)
                    {
-                     case KEY_F_WT(blob_raw, pbf_wt_length_delim):
+                     case KEY_F_WT(blob_raw, cosm::pbf_wt_length_delim):
                        blob->compression_type = pbf_blob::compression::none;
-                       blob->data = { field.pointer, field.len };
+                       blob->data = field.data.length_delim;
                        break;
-                     case KEY_F_WT(blob_raw_size, pbf_wt_varint):
-                       blob->raw_size = static_cast<uint32_t>(field.varint);
+                     case KEY_F_WT(blob_raw_size, cosm::pbf_wt_varint):
+                       blob->raw_size =
+                         static_cast<uint32_t>(field.data.varint);
                        break;
-                     case KEY_F_WT(blob_zlib, pbf_wt_length_delim):
+                     case KEY_F_WT(blob_zlib, cosm::pbf_wt_length_delim):
                        blob->compression_type = pbf_blob::compression::zlib;
-                       blob->data = { field.pointer, field.len };
+                       blob->data = field.data.length_delim;
                        break;
                      default:
                        break;
@@ -782,17 +735,17 @@ read_data(osm_counter* counter, cosm::span<char> file) noexcept
 
 // we only allocate memory once, for the whole program, then we use this
 // pointer to get chunks
-cosm::span<uint8_t> global_memory_pool;
-cosm::span<uint8_t> global_scratch_memory;
-cosm::span<uint8_t> global_mapped_file_memory;
-uint8_t* global_scratch_memory_start = nullptr;
+cosm::span<char> global_memory_pool;
+cosm::span<char> global_scratch_memory;
+cosm::span<char> global_mapped_file_memory;
+char* global_scratch_memory_start = nullptr;
 
 template<size_t Alignment = 8>
-[[nodiscard]] uint8_t*
+[[nodiscard]] char*
 global_alloc(size_t size) noexcept
 {
   const size_t aligned_size = (size + Alignment - 1) & ~(Alignment - 1);
-  uint8_t* chunk = global_memory_pool;
+  char* chunk = global_memory_pool;
   global_scratch_memory_start += aligned_size;
   return chunk;
 }
@@ -827,7 +780,6 @@ main(int argc, char** argv)
   size_t mapped_file_size = 0;
 
   {
-    // open file
     int fd = open(argv[1], O_RDONLY);
     if (fd == -1)
     {
@@ -864,22 +816,22 @@ main(int argc, char** argv)
     {
       puts("W: could not allocate huge pages for mmap");
 
-      memory = static_cast<uint8_t*>(mmap(nullptr,
-                                          page_aligned_total_size,
-                                          PROT_READ | PROT_WRITE,
-                                          MAP_PRIVATE | MAP_ANONYMOUS,
-                                          -1,
-                                          0));
+      memory = static_cast<char*>(mmap(nullptr,
+                                       page_aligned_total_size,
+                                       PROT_READ | PROT_WRITE,
+                                       MAP_PRIVATE | MAP_ANONYMOUS,
+                                       -1,
+                                       0));
       if (memory == MAP_FAILED)
       {
         return error("mmap global");
       }
 
-      global_memory_pool = cosm::span<uint8_t>(static_cast<uint8_t*>(memory),
-                                               page_aligned_total_size);
-      global_scratch_memory = cosm::span<uint8_t>(
-        static_cast<uint8_t*>(memory) + page_aligned_file_size,
-        page_aligned_scratch_space);
+      global_memory_pool =
+        cosm::span<char>(static_cast<char*>(memory), page_aligned_total_size);
+      global_scratch_memory =
+        cosm::span<char>(static_cast<char*>(memory) + page_aligned_file_size,
+                         page_aligned_scratch_space);
       global_scratch_memory_start = global_scratch_memory.data();
     }
 
@@ -895,7 +847,7 @@ main(int argc, char** argv)
     }
 
     global_mapped_file_memory =
-      cosm::span<uint8_t>(static_cast<uint8_t*>(mapped_file), mapped_file_size);
+      cosm::span<char>(static_cast<char*>(mapped_file), mapped_file_size);
 
     madvise(mapped_file, page_aligned_file_size, MADV_SEQUENTIAL);
 

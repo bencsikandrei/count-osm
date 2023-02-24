@@ -2,7 +2,6 @@
 benchmark/1.6.1
 gtest/1.10.0
 libdeflate/1.17
-zlib/1.2.13
 
 [generators]
 cmake_paths
