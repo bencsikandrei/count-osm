@@ -22,7 +22,10 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
-// #define COSM_DONT_DEBUG
+// simd
+#include <immintrin.h>
+
+#define COSM_DONT_DEBUG
 
 template<typename What>
 static void
@@ -261,18 +264,76 @@ fast_count_dense_ids(cosm::span<const char> dense_nodes_id)
 {
   size_t count = 0;
   // we need to count the number of varints, we can thus count the bytes that
-  // have the 8th bit set to 1
+  // have the 8th bit set to 0 (1 means there's still bytes in that number)
+
+  const char* p = dense_nodes_id.begin();
+  const char* e = dense_nodes_id.end();
 
 #ifdef __AVX2__
-
-#else
-  for (auto b : dense_nodes_id)
+  constexpr int64_t unroll_factor = 32;
+  const int64_t unrolled_elements = dense_nodes_id.size() / unroll_factor;
+  const __m256i _32_0x80 = _mm256_set1_epi8(-128);
+  for (int64_t i = 0; i < unrolled_elements; ++i)
   {
-    count += ((static_cast<uint8_t>(b) & 0x80u) != 0x80);
+    __m256i chars = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(p));
+    __m256i chars_and_0x80 = _mm256_and_si256(chars, _32_0x80);
+    unsigned mask = _mm256_movemask_epi8(chars_and_0x80);
+    count += __builtin_popcount(~mask);
+    p += unroll_factor;
   }
 #endif
 
+  for (; p != e; ++p)
+  {
+    count += ((*p) > 0);
+  }
+
   return count;
+}
+
+static bool
+count_relations(size_t* relations_count, cosm::span<const char> relations)
+{
+  const char* b = relations.begin();
+  iterate_fields(&b,
+                 relations.end(),
+                 [relations_count](pbf_field& field) -> bool
+                 {
+                   static constexpr uint32_t relation_id = 1;
+                   switch (field.key)
+                   {
+                     case KEY_F_WT(relation_id, pbf_wt_varint):
+                       ++(*relations_count);
+                       break;
+                     default:
+                       break;
+                   }
+                   return true;
+                 });
+  return true;
+}
+
+static bool
+count_ways(size_t* ways_count, cosm::span<const char> ways)
+{
+  const char* b = ways.begin();
+  const char* e = ways.end();
+  iterate_fields(&b,
+                 e,
+                 [ways_count](pbf_field& field) -> bool
+                 {
+                   static constexpr uint32_t way_id = 1;
+                   switch (field.key)
+                   {
+                     case KEY_F_WT(way_id, pbf_wt_varint):
+                       ++(*ways_count);
+                       break;
+                     default:
+                       break;
+                   }
+                   return true;
+                 });
+  return true;
 }
 
 static bool
@@ -304,17 +365,16 @@ count_dense_nodes(size_t* nodes_count, cosm::span<const char> dense_nodes)
   return true;
 }
 
+template<typename Callback>
 static bool
-decode_primitive_groups(cosm::span<const char>* dense_nodes,
-                        entity_state* state,
-                        cosm::span<const char> primitive_groups)
+decode_primitive_groups(cosm::span<const char> primitive_groups, Callback&& cb)
 {
   const char* b = primitive_groups.begin();
   const char* e = primitive_groups.end();
   iterate_fields(
     &b,
     e,
-    [dense_nodes, state](pbf_field& field) -> bool
+    [&cb](pbf_field& field) -> bool
     {
       // static constexpr uint32_t primitivegroup_nodes = 1; // TODO
       static constexpr uint32_t primitivegroup_dense_nodes = 2;
@@ -323,15 +383,16 @@ decode_primitive_groups(cosm::span<const char>* dense_nodes,
       switch (field.key)
       {
         case KEY_F_WT(primitivegroup_dense_nodes, pbf_wt_length_delim):
-          *dense_nodes = { reinterpret_cast<const char*>(field.pointer),
-                           field.len };
-          *state = entity_state::nodes;
+          cb(entity_state::nodes,
+             { reinterpret_cast<const char*>(field.pointer), field.len });
           break;
         case KEY_F_WT(primitivegroup_ways, pbf_wt_length_delim):
-          *state = entity_state::ways;
+          cb(entity_state::ways,
+             { reinterpret_cast<const char*>(field.pointer), field.len });
           break;
         case KEY_F_WT(primitivegroup_relations, pbf_wt_length_delim):
-          *state = entity_state::relations;
+          cb(entity_state::relations,
+             { reinterpret_cast<const char*>(field.pointer), field.len });
           break;
         default:
           break;
@@ -342,23 +403,23 @@ decode_primitive_groups(cosm::span<const char>* dense_nodes,
   return true;
 }
 
+template<typename Callback>
 static bool
-decode_primitive_block(cosm::span<const char>* primitive_groups,
-                       cosm::span<const char> primitive_block) noexcept
+decode_primitive_block(cosm::span<const char> primitive_block,
+                       Callback&& cb) noexcept
 {
   const char* b = primitive_block.begin();
   const char* e = primitive_block.end();
   iterate_fields(
     &b,
     e,
-    [primitive_groups](pbf_field& field) -> bool
+    [&cb](pbf_field& field) -> bool
     {
       static constexpr uint32_t primitiveblock_primitivegroup = 2;
       switch (field.key)
       {
         case KEY_F_WT(primitiveblock_primitivegroup, pbf_wt_length_delim):
-          *primitive_groups = { reinterpret_cast<const char*>(field.pointer),
-                                field.len };
+          cb({ reinterpret_cast<const char*>(field.pointer), field.len });
           break;
         default:
           break;
@@ -503,8 +564,10 @@ read_data(cosm::span<char> file) noexcept
 
   // we start with nodes
   entity_state crt_entity_s = entity_state::nodes;
-  entity_state prv_entity_s = crt_entity_s;
+  // entity_state prv_entity_s = crt_entity_s;
   size_t nodes_count = 0;
+  size_t ways_count = 0;
+  size_t relations_count = 0;
 
   while (p < end)
   {
@@ -523,20 +586,6 @@ read_data(cosm::span<char> file) noexcept
     {
       return false;
     }
-
-    COSM_DEBUG({
-      printf("Header size = %u\n", header_size);
-      static char debug_string[1'024];
-      memcpy(debug_string, next_blob_type.data(), next_blob_type.size());
-      debug_string[next_blob_type.size()] = '\0';
-      printf("Next blob type '%s' size = %d\n", debug_string, next_blob_size);
-      printf("Blob of size: %llu (uncompressed: %u) and compression type: %u\n",
-             blob.data.size(),
-             blob.raw_size,
-             static_cast<unsigned>(blob.compression_type));
-      // raw data
-      // fwrite(blob.data.data(), 1, blob.data.size(), stdout);
-    });
 
     p += (header_size + next_blob_size);
     size_t actual_decompressed_size = 0;
@@ -561,34 +610,34 @@ read_data(cosm::span<char> file) noexcept
     }
 
     // we now have a PrimitiveGroup inside buffer_out
-    cosm::span<const char> pimitive_groups;
-    decode_primitive_block(&pimitive_groups,
-                           { buffer_out, actual_decompressed_size });
-
-    COSM_DEBUG({
-      printf("Primitive groups size %llu (decompressed size %lu)\n",
-             pimitive_groups.size(),
-             actual_decompressed_size);
-    });
-
-    cosm::span<const char> dense_nodes;
-    decode_primitive_groups(&dense_nodes, &crt_entity_s, pimitive_groups);
-
-    COSM_DEBUG({
-      printf("Densenodes size %llu, %s\n",
-             dense_nodes.size(),
-             entity_state_string(crt_entity_s));
-    });
-
-    if (crt_entity_s == entity_state::nodes)
-    {
-      count_dense_nodes(&nodes_count, dense_nodes);
-    }
-
-    prv_entity_s = crt_entity_s;
+    decode_primitive_block({ buffer_out, actual_decompressed_size },
+                           [&nodes_count, &ways_count, &relations_count](
+                             cosm::span<const char> primitive_groups)
+                           {
+                             decode_primitive_groups(
+                               primitive_groups,
+                               [&nodes_count, &ways_count, &relations_count](
+                                 entity_state es, cosm::span<const char> data)
+                               {
+                                 switch (es)
+                                 {
+                                   case entity_state::nodes:
+                                     count_dense_nodes(&nodes_count, data);
+                                     break;
+                                   case entity_state::ways:
+                                     count_ways(&ways_count, data);
+                                     break;
+                                   case entity_state::relations:
+                                     count_relations(&relations_count, data);
+                                     break;
+                                 }
+                               });
+                           });
   }
 
-  COSM_DEBUG({ printf("Total nodes %lu\n", nodes_count); });
+  printf("Total nodes %lu\n", nodes_count);
+  printf("Total ways %lu\n", ways_count);
+  printf("Total relations %lu\n", relations_count);
 
   return true;
 }
