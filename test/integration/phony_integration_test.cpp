@@ -152,24 +152,6 @@ iterate_fields(const char** begin, const char* end, Callback&& cb) noexcept
   return true;
 }
 
-// static bool
-// skip_length_delim(const char** __restrict__ begin, const char* __restrict__
-// end)
-// {
-//   // read the length as varint
-//   if (auto [len, sts] = cosm::decode_varint_u64(begin, end);
-//       sts != cosm::varint_status::ok)
-//   {
-//     return false;
-//   }
-//   else
-//   {
-//     // advance by the len
-//     begin += len;
-//   }
-//   return true;
-// }
-
 static constexpr uint32_t
 KEY_F_WT(uint32_t field_number, char wire_type)
 {
