@@ -25,6 +25,11 @@
 // simd
 #include <immintrin.h>
 
+// don't want to add STL stuff, but here we go
+#include <mutex>
+#include <queue>
+#include <thread>
+
 #define COSM_DONT_DEBUG
 
 template<typename What>
@@ -495,7 +500,7 @@ decode_header_blob(cosm::span<const char> blob_data,
   return true;
 }
 
-struct Counter
+struct osm_counter
 {
   size_t nodes = 0;
   size_t ways = 0;
@@ -542,8 +547,22 @@ read_data_status_string(read_data_status sts) noexcept
   return "unknown error!";
 }
 
+struct alignas(64) worker
+{
+  ~worker() noexcept
+  {
+    free(buffer);
+    buffer = nullptr;
+  }
+
+  char* buffer = nullptr;
+  osm_counter counter;
+};
+
+alignas(64) worker thread_workers[12];
+
 static read_data_status
-read_data(Counter* counter, cosm::span<char> file) noexcept
+read_data(osm_counter* counter, cosm::span<char> file) noexcept
 {
   const char* p = file.data();
   [[maybe_unused]] const char* end = file.data() + file.size();
@@ -584,13 +603,14 @@ read_data(Counter* counter, cosm::span<char> file) noexcept
   auto free_decompressor =
     cosm::make_defer([dec]() noexcept { libdeflate_free_decompressor(dec); });
 
-  char* buffer_out = static_cast<char*>(aligned_alloc(64, 8 * 1'024 * 1'024));
-  if (!buffer_out)
+  for (worker& w : thread_workers)
   {
-    return read_data_status::e_buffer_allocation;
+    w.buffer = static_cast<char*>(aligned_alloc(64, 1 * 1'024 * 1'024));
+    if (!w.buffer)
+    {
+      return read_data_status::e_buffer_allocation;
+    }
   }
-  auto free_buffer_out =
-    cosm::make_defer([buffer_out]() noexcept { free(buffer_out); });
 
   while (p < end)
   {
@@ -621,7 +641,7 @@ read_data(Counter* counter, cosm::span<char> file) noexcept
         libdeflate_zlib_decompress(dec,
                                    blob.data.data(),
                                    blob.data.size(),
-                                   buffer_out,
+                                   thread_workers[0].buffer,
                                    blob.raw_size,
                                    &actual_decompressed_size);
 
@@ -630,7 +650,7 @@ read_data(Counter* counter, cosm::span<char> file) noexcept
         return read_data_status::e_decompress_data_blob;
       }
 
-      actual_data = buffer_out;
+      actual_data = thread_workers[0].buffer;
       actual_data_size = actual_decompressed_size;
     }
 
@@ -789,7 +809,7 @@ main(int argc, char** argv)
     // end of the mapped file?
   }
 
-  Counter counter;
+  osm_counter counter;
   if (const read_data_status sts =
         read_data(&counter,
                   cosm::span<char>(
