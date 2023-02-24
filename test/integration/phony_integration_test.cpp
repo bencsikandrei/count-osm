@@ -26,6 +26,7 @@
 #include <immintrin.h>
 
 // don't want to add STL stuff, but here we go
+#include <condition_variable>
 #include <mutex>
 #include <queue>
 #include <thread>
@@ -322,9 +323,8 @@ static bool
 count_ways(size_t* ways_count, cosm::span<const char> ways)
 {
   const char* b = ways.begin();
-  const char* e = ways.end();
   iterate_fields(&b,
-                 e,
+                 ways.end(),
                  [ways_count](pbf_field& field) -> bool
                  {
                    static constexpr uint32_t way_id = 1;
@@ -345,10 +345,9 @@ static bool
 count_dense_nodes(size_t* nodes_count, cosm::span<const char> dense_nodes)
 {
   const char* b = dense_nodes.begin();
-  const char* e = dense_nodes.end();
   iterate_fields(
     &b,
-    e,
+    dense_nodes.end(),
     [nodes_count](pbf_field& field) -> bool
     {
       // static constexpr uint32_t primitivegroup_nodes = 1; // TODO
@@ -559,7 +558,117 @@ struct alignas(64) worker
   osm_counter counter;
 };
 
+struct work_item
+{
+  const char* data = nullptr;
+  size_t size = 0;
+  int32_t raw_size = 0;
+  pbf_blob::compression compression_type;
+};
+
 alignas(64) worker thread_workers[12];
+alignas(64) std::thread thread_threads[12];
+alignas(64) std::queue<work_item> thread_queue;
+alignas(64) std::mutex thread_mutex;
+alignas(64) std::condition_variable thread_cv;
+static constexpr size_t decompress_buffer_size = 8 * 1'024 * 1'024;
+
+void
+do_work(int thread_index)
+{
+  libdeflate_decompressor* dec = libdeflate_alloc_decompressor();
+  if (!dec)
+  {
+    return;
+  }
+  auto free_decompressor = cosm::make_defer(
+    [dec, thread_index]() noexcept { libdeflate_free_decompressor(dec); });
+
+  constexpr int max_wi_per_pop = 1;
+  while (true)
+  {
+    work_item wi[max_wi_per_pop];
+    int actual_work_items = 0;
+    {
+      std::unique_lock<std::mutex> lck(thread_mutex);
+
+      if (!thread_cv.wait_for(lck,
+                              std::chrono::microseconds(10),
+                              []() { return !thread_queue.empty(); }))
+      {
+        continue;
+      }
+
+      while (!thread_queue.empty() && actual_work_items < max_wi_per_pop)
+      {
+        wi[actual_work_items++] = thread_queue.front();
+        thread_queue.pop();
+      }
+    }
+
+    for (int i = 0; i < actual_work_items; ++i)
+    {
+      if (wi[i].data == nullptr)
+      {
+        // stop token
+        return;
+      }
+
+      const char* actual_data = reinterpret_cast<const char*>(wi[i].data);
+      size_t actual_data_size = wi[i].size;
+
+      if (wi[i].compression_type == pbf_blob::compression::zlib)
+      {
+        size_t actual_decompressed_size = decompress_buffer_size;
+        libdeflate_result res =
+          libdeflate_zlib_decompress(dec,
+                                     actual_data,
+                                     actual_data_size,
+                                     thread_workers[thread_index].buffer,
+                                     actual_decompressed_size,
+                                     &actual_decompressed_size);
+
+        if (res != libdeflate_result::LIBDEFLATE_SUCCESS)
+        {
+          return;
+        }
+
+        actual_data = thread_workers[thread_index].buffer;
+        actual_data_size = actual_decompressed_size;
+      }
+
+      // we now have a PrimitiveBlock inside buffer_out
+      decode_primitive_block(
+        { actual_data, actual_data_size },
+        [thread_index](cosm::span<const char> primitive_groups)
+        {
+          // we have a repeated PrimitiveGroup inside
+          // primitive_groups
+          decode_primitive_groups(
+            primitive_groups,
+            [thread_index](entity_state es, cosm::span<const char> data)
+            {
+              // data contains either dense nodes, ways or
+              // relations
+              switch (es)
+              {
+                case entity_state::nodes:
+                  count_dense_nodes(&thread_workers[thread_index].counter.nodes,
+                                    data);
+                  break;
+                case entity_state::ways:
+                  count_ways(&thread_workers[thread_index].counter.ways, data);
+                  break;
+                case entity_state::relations:
+                  count_relations(
+                    &thread_workers[thread_index].counter.relations, data);
+                  break;
+              }
+            });
+        });
+    }
+  }
+}
 
 static read_data_status
 read_data(osm_counter* counter, cosm::span<char> file) noexcept
@@ -595,21 +704,19 @@ read_data(osm_counter* counter, cosm::span<char> file) noexcept
   // every entity is inside a so called `blob` which is also pbf encoded (see
   // fileformat.proto
 
-  libdeflate_decompressor* dec = libdeflate_alloc_decompressor();
-  if (!dec)
-  {
-    return read_data_status::e_decompress_create;
-  }
-  auto free_decompressor =
-    cosm::make_defer([dec]() noexcept { libdeflate_free_decompressor(dec); });
-
   for (worker& w : thread_workers)
   {
-    w.buffer = static_cast<char*>(aligned_alloc(64, 1 * 1'024 * 1'024));
+    w.buffer = static_cast<char*>(aligned_alloc(64, decompress_buffer_size));
     if (!w.buffer)
     {
       return read_data_status::e_buffer_allocation;
     }
+  }
+
+  int thread_index = 0;
+  for (std::thread& t : thread_threads)
+  {
+    t = std::thread(do_work, thread_index++);
   }
 
   while (p < end)
@@ -631,56 +738,43 @@ read_data(osm_counter* counter, cosm::span<char> file) noexcept
 
     p += (header_size + next_blob_size);
 
-    const char* actual_data = reinterpret_cast<const char*>(blob.data.data());
-    size_t actual_data_size = blob.data.size();
-
-    if (blob.compression_type == pbf_blob::compression::zlib)
     {
-      size_t actual_decompressed_size = blob.raw_size;
-      libdeflate_result res =
-        libdeflate_zlib_decompress(dec,
-                                   blob.data.data(),
-                                   blob.data.size(),
-                                   thread_workers[0].buffer,
-                                   blob.raw_size,
-                                   &actual_decompressed_size);
-
-      if (res != libdeflate_result::LIBDEFLATE_SUCCESS)
-      {
-        return read_data_status::e_decompress_data_blob;
-      }
-
-      actual_data = thread_workers[0].buffer;
-      actual_data_size = actual_decompressed_size;
+      std::lock_guard<std::mutex> l(thread_mutex);
+      thread_queue.push(
+        work_item{ .data = reinterpret_cast<const char*>(blob.data.data()),
+                   .size = blob.data.size(),
+                   .compression_type = blob.compression_type });
     }
+    thread_cv.notify_one();
+  }
 
-    // we now have a PrimitiveBlock inside buffer_out
-    decode_primitive_block(
-      { actual_data, actual_data_size },
-      [counter](cosm::span<const char> primitive_groups)
-      {
-        // we have a repeated PrimitiveGroup inside
-        // primitive_groups
-        decode_primitive_groups(
-          primitive_groups,
-          [counter](entity_state es, cosm::span<const char> data)
-          {
-            // data contains either dense nodes, ways or
-            // relations
-            switch (es)
-            {
-              case entity_state::nodes:
-                count_dense_nodes(&counter->nodes, data);
-                break;
-              case entity_state::ways:
-                count_ways(&counter->ways, data);
-                break;
-              case entity_state::relations:
-                count_relations(&counter->relations, data);
-                break;
-            }
-          });
-      });
+  {
+    std::lock_guard<std::mutex> lck(thread_mutex);
+    for (int i = 0; i < 48; ++i)
+    {
+      // launch 12 stop tokens
+      thread_queue.push(work_item{ .data = nullptr });
+    }
+  }
+
+  for (int i = 0; i < 48; ++i)
+  {
+    thread_cv.notify_one();
+  }
+
+  for (auto& t : thread_threads)
+  {
+    if (t.joinable())
+    {
+      t.join();
+    }
+  }
+
+  for (auto& w : thread_workers)
+  {
+    counter->nodes += w.counter.nodes;
+    counter->ways += w.counter.ways;
+    counter->relations += w.counter.relations;
   }
 
   return read_data_status::ok;
