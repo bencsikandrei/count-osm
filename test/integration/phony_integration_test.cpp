@@ -268,10 +268,9 @@ static bool
 decode_primitive_groups(cosm::span<const char> primitive_groups, Callback&& cb)
 {
   const char* b = primitive_groups.begin();
-  const char* e = primitive_groups.end();
-  iterate_fields(
+  return iterate_fields(
     &b,
-    e,
+    primitive_groups.end(),
     [&cb](cosm::pbf_field& field) -> bool
     {
       // static constexpr uint32_t primitivegroup_nodes = 1; //
@@ -297,8 +296,6 @@ decode_primitive_groups(cosm::span<const char> primitive_groups, Callback&& cb)
       }
       return true;
     });
-
-  return true;
 }
 
 template<typename Callback>
@@ -307,25 +304,23 @@ decode_primitive_block(cosm::span<const char> primitive_block,
                        Callback&& cb) noexcept
 {
   const char* b = primitive_block.begin();
-  const char* e = primitive_block.end();
-  iterate_fields(&b,
-                 e,
-                 [&cb](cosm::pbf_field& field) -> bool
-                 {
-                   static constexpr uint32_t primitiveblock_primitivegroup = 2;
-                   switch (field.key)
-                   {
-                     case cosm::protobuf_key(primitiveblock_primitivegroup,
-                                             cosm::pbf_wt_length_delim):
-                       cb(field.data.length_delim);
-                       break;
-                     default:
-                       break;
-                   }
-                   return true;
-                 });
-
-  return true;
+  return iterate_fields(
+    &b,
+    primitive_block.end(),
+    [&cb](cosm::pbf_field& field) -> bool
+    {
+      static constexpr uint32_t primitiveblock_primitivegroup = 2;
+      switch (field.key)
+      {
+        case cosm::protobuf_key(primitiveblock_primitivegroup,
+                                cosm::pbf_wt_length_delim):
+          cb(field.data.length_delim);
+          break;
+        default:
+          break;
+      }
+      return true;
+    });
 }
 
 static bool
@@ -333,11 +328,12 @@ decode_header_blob(cosm::span<const char> blob_data,
                    cosm::pbf_blob* __restrict__ blob) noexcept
 {
   const char* b = blob_data.begin();
-  iterate_fields(
+  const bool res = iterate_fields(
     &b,
     blob_data.end(),
     [blob](cosm::pbf_field& field) -> bool
     {
+      // these are not always in this order!
       constexpr uint32_t blob_raw = 1;
       constexpr uint32_t blob_raw_size = 2;
       constexpr uint32_t blob_zlib = 3;
@@ -358,7 +354,6 @@ decode_header_blob(cosm::span<const char> blob_data,
         default:
           break;
       }
-
       return true;
     });
 
@@ -368,7 +363,7 @@ decode_header_blob(cosm::span<const char> blob_data,
     blob->raw_size = static_cast<uint32_t>(blob->data.size());
   }
 
-  return true;
+  return res;
 }
 
 struct osm_counter
