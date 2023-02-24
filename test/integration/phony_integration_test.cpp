@@ -99,6 +99,8 @@ read_field(pbf_field* __restrict__ field,
            const char* __restrict__ end)
 {
   assert(field && "Pass valid values for field");
+  assert(begin && "Pass valid values for begin");
+  assert(end && "Pass valid values for end");
 
   cosm::varint_result decoded = cosm::decode_varint_u64(begin, end);
   if (decoded.sts != cosm::varint_status::ok)
