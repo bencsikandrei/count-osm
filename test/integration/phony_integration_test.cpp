@@ -241,13 +241,12 @@ static bool
 count_dense_nodes(size_t* nodes_count, cosm::span<const char> dense_nodes)
 {
   const char* b = dense_nodes.begin();
-  iterate_fields(
+  return iterate_fields(
     &b,
     dense_nodes.end(),
     [nodes_count](cosm::pbf_field& field) -> bool
     {
-      // static constexpr uint32_t primitivegroup_nodes = 1; //
-      // TODO
+      // TODO: do we need the 'nodes' field? id = 0;
       static constexpr uint32_t dense_nodes_id = 1;
       switch (field.key)
       {
@@ -259,8 +258,6 @@ count_dense_nodes(size_t* nodes_count, cosm::span<const char> dense_nodes)
       }
       return true;
     });
-
-  return true;
 }
 
 template<typename Callback>
@@ -428,10 +425,14 @@ struct alignas(64) worker
 struct work_item
 {
   const char* data = nullptr;
-  size_t size = 0;
-  int32_t raw_size = 0;
-  cosm::pbf_blob::compression compression_type;
+  // we know that these are smaller than 2GB
+  uint32_t raw_size = 0;
+  // raw size is (almost) always larger than the compressed size
+  uint32_t size : 31 = 0;
+  uint32_t compression_type : 1 = 0;
 };
+
+static_assert(sizeof(work_item) == 16);
 
 alignas(64) worker thread_workers[12];
 alignas(64) std::thread thread_threads[12];
@@ -451,7 +452,7 @@ do_work(int thread_index)
   auto free_decompressor = cosm::make_defer(
     [dec, thread_index]() noexcept { libdeflate_free_decompressor(dec); });
 
-  constexpr int max_wi_per_pop = 1;
+  constexpr int max_wi_per_pop = 4;
   while (true)
   {
     work_item wi[max_wi_per_pop];
@@ -484,7 +485,8 @@ do_work(int thread_index)
       const char* actual_data = reinterpret_cast<const char*>(wi[i].data);
       size_t actual_data_size = wi[i].size;
 
-      if (wi[i].compression_type == cosm::pbf_blob::compression::zlib)
+      if (wi[i].compression_type ==
+          static_cast<uint32_t>(cosm::pbf_blob::compression::zlib))
       {
         size_t actual_decompressed_size = decompress_buffer_size;
         libdeflate_result res =
@@ -607,10 +609,10 @@ read_data(osm_counter* counter, cosm::span<char> file) noexcept
 
     {
       std::lock_guard<std::mutex> l(thread_mutex);
-      thread_queue.push(
-        work_item{ .data = reinterpret_cast<const char*>(blob.data.data()),
-                   .size = blob.data.size(),
-                   .compression_type = blob.compression_type });
+      thread_queue.push(work_item{
+        .data = reinterpret_cast<const char*>(blob.data.data()),
+        .size = static_cast<uint32_t>(blob.data.size()),
+        .compression_type = static_cast<uint32_t>(blob.compression_type) });
     }
     thread_cv.notify_one();
   }
