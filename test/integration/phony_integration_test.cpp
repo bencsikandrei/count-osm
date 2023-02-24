@@ -4,6 +4,7 @@
 #include <branch_hints.h>
 #include <defer.h>
 #include <numbers.h>
+#include <osm_pbf.h>
 #include <protobuf.h>
 #include <span.h>
 
@@ -66,35 +67,8 @@ error(const char* what) noexcept
   return 1;
 }
 
-struct pbf_field
-{
-  union VarintOrLenDelim
-  {
-    constexpr VarintOrLenDelim() noexcept
-      : varint(0)
-    {
-    }
-    uint64_t varint = 0;
-    cosm::span<const char> length_delim;
-  };
-
-  uint32_t key = 0; // field and wt
-  // pad 4 bytes
-  VarintOrLenDelim data;
-
-  constexpr cosm::pbf_wt wire_type() const noexcept
-  {
-    return static_cast<cosm::pbf_wt>(cosm::protobuf_wire_type(key));
-  }
-
-  constexpr uint32_t field_number() const noexcept
-  {
-    return cosm::protobuf_field_number(key);
-  }
-};
-
 bool
-read_field(pbf_field* __restrict__ field,
+read_field(cosm::pbf_field* __restrict__ field,
            const char** __restrict__ begin,
            const char* __restrict__ end)
 {
@@ -143,7 +117,10 @@ template<typename Callback>
 static bool
 iterate_fields(const char** begin, const char* end, Callback&& cb) noexcept
 {
-  pbf_field field;
+  assert(begin && "Pass valid values for begin");
+  assert(end && "Pass valid values for end");
+
+  cosm::pbf_field field;
   while (*begin < end)
   {
     if (!read_field(&field, begin, end) || !cb(field))
@@ -160,20 +137,21 @@ decode_file_header(cosm::span<const char> header,
                    int32_t* __restrict__ size) noexcept
 {
   const char* b = header.begin();
-  const char* e = header.end();
-  iterate_fields(
+  return iterate_fields(
     &b,
-    e,
-    [type, size](pbf_field& field) -> bool
+    header.end(),
+    [type, size](cosm::pbf_field& field) -> bool
     {
       constexpr uint32_t blob_header_type = 1;
       constexpr uint32_t blob_header_datasize = 3;
       switch (field.key)
       {
         case cosm::protobuf_key(blob_header_type, cosm::pbf_wt_length_delim):
+          assert(type);
           *type = field.data.length_delim;
           break;
         case cosm::protobuf_key(blob_header_datasize, cosm::pbf_wt_varint):
+          assert(size);
           *size = field.data.varint;
           break;
         default:
@@ -181,31 +159,6 @@ decode_file_header(cosm::span<const char> header,
       }
       return true;
     });
-
-  return true;
-}
-
-enum class entity_state
-{
-  nodes = 0,
-  ways = 1,
-  relations = 2
-};
-
-static constexpr const char*
-entity_state_string(entity_state es) noexcept
-{
-  switch (es)
-  {
-    case entity_state::nodes:
-      return "nodes";
-    case entity_state::ways:
-      return "ways";
-    case entity_state::relations:
-      return "relations";
-  }
-
-  return "error!";
 }
 
 size_t
@@ -246,7 +199,7 @@ count_relations(size_t* relations_count, cosm::span<const char> relations)
   const char* b = relations.begin();
   iterate_fields(&b,
                  relations.end(),
-                 [relations_count](pbf_field& field) -> bool
+                 [relations_count](cosm::pbf_field& field) -> bool
                  {
                    static constexpr uint32_t relation_id = 1;
                    switch (field.key)
@@ -268,7 +221,7 @@ count_ways(size_t* ways_count, cosm::span<const char> ways)
   const char* b = ways.begin();
   iterate_fields(&b,
                  ways.end(),
-                 [ways_count](pbf_field& field) -> bool
+                 [ways_count](cosm::pbf_field& field) -> bool
                  {
                    static constexpr uint32_t way_id = 1;
                    switch (field.key)
@@ -291,7 +244,7 @@ count_dense_nodes(size_t* nodes_count, cosm::span<const char> dense_nodes)
   iterate_fields(
     &b,
     dense_nodes.end(),
-    [nodes_count](pbf_field& field) -> bool
+    [nodes_count](cosm::pbf_field& field) -> bool
     {
       // static constexpr uint32_t primitivegroup_nodes = 1; //
       // TODO
@@ -316,34 +269,34 @@ decode_primitive_groups(cosm::span<const char> primitive_groups, Callback&& cb)
 {
   const char* b = primitive_groups.begin();
   const char* e = primitive_groups.end();
-  iterate_fields(&b,
-                 e,
-                 [&cb](pbf_field& field) -> bool
-                 {
-                   // static constexpr uint32_t primitivegroup_nodes = 1; //
-                   // TODO
-                   static constexpr uint32_t primitivegroup_dense_nodes = 2;
-                   static constexpr uint32_t primitivegroup_ways = 3;
-                   static constexpr uint32_t primitivegroup_relations = 4;
-                   switch (field.key)
-                   {
-                     case cosm::protobuf_key(primitivegroup_dense_nodes,
-                                             cosm::pbf_wt_length_delim):
-                       cb(entity_state::nodes, field.data.length_delim);
-                       break;
-                     case cosm::protobuf_key(primitivegroup_ways,
-                                             cosm::pbf_wt_length_delim):
-                       cb(entity_state::ways, field.data.length_delim);
-                       break;
-                     case cosm::protobuf_key(primitivegroup_relations,
-                                             cosm::pbf_wt_length_delim):
-                       cb(entity_state::relations, field.data.length_delim);
-                       break;
-                     default:
-                       break;
-                   }
-                   return true;
-                 });
+  iterate_fields(
+    &b,
+    e,
+    [&cb](cosm::pbf_field& field) -> bool
+    {
+      // static constexpr uint32_t primitivegroup_nodes = 1; //
+      // TODO
+      static constexpr uint32_t primitivegroup_dense_nodes = 2;
+      static constexpr uint32_t primitivegroup_ways = 3;
+      static constexpr uint32_t primitivegroup_relations = 4;
+      switch (field.key)
+      {
+        case cosm::protobuf_key(primitivegroup_dense_nodes,
+                                cosm::pbf_wt_length_delim):
+          cb(cosm::entity_state::nodes, field.data.length_delim);
+          break;
+        case cosm::protobuf_key(primitivegroup_ways, cosm::pbf_wt_length_delim):
+          cb(cosm::entity_state::ways, field.data.length_delim);
+          break;
+        case cosm::protobuf_key(primitivegroup_relations,
+                                cosm::pbf_wt_length_delim):
+          cb(cosm::entity_state::relations, field.data.length_delim);
+          break;
+        default:
+          break;
+      }
+      return true;
+    });
 
   return true;
 }
@@ -357,7 +310,7 @@ decode_primitive_block(cosm::span<const char> primitive_block,
   const char* e = primitive_block.end();
   iterate_fields(&b,
                  e,
-                 [&cb](pbf_field& field) -> bool
+                 [&cb](cosm::pbf_field& field) -> bool
                  {
                    static constexpr uint32_t primitiveblock_primitivegroup = 2;
                    switch (field.key)
@@ -375,28 +328,15 @@ decode_primitive_block(cosm::span<const char> primitive_block,
   return true;
 }
 
-struct pbf_blob
-{
-  enum class compression : uint32_t
-  {
-    none,
-    zlib
-  };
-  compression compression_type = compression::none;
-  // when no compression, equal to data.size()
-  uint32_t raw_size = 0;
-  cosm::span<const char> data;
-};
-
 static bool
 decode_header_blob(cosm::span<const char> blob_data,
-                   pbf_blob* __restrict__ blob) noexcept
+                   cosm::pbf_blob* __restrict__ blob) noexcept
 {
   const char* b = blob_data.begin();
   iterate_fields(
     &b,
     blob_data.end(),
-    [blob](pbf_field& field) -> bool
+    [blob](cosm::pbf_field& field) -> bool
     {
       constexpr uint32_t blob_raw = 1;
       constexpr uint32_t blob_raw_size = 2;
@@ -405,14 +345,14 @@ decode_header_blob(cosm::span<const char> blob_data,
       switch (field.key)
       {
         case cosm::protobuf_key(blob_raw, cosm::pbf_wt_length_delim):
-          blob->compression_type = pbf_blob::compression::none;
+          blob->compression_type = cosm::pbf_blob::compression::none;
           blob->data = field.data.length_delim;
           break;
         case cosm::protobuf_key(blob_raw_size, cosm::pbf_wt_varint):
           blob->raw_size = static_cast<uint32_t>(field.data.varint);
           break;
         case cosm::protobuf_key(blob_zlib, cosm::pbf_wt_length_delim):
-          blob->compression_type = pbf_blob::compression::zlib;
+          blob->compression_type = cosm::pbf_blob::compression::zlib;
           blob->data = field.data.length_delim;
           break;
         default:
@@ -423,7 +363,7 @@ decode_header_blob(cosm::span<const char> blob_data,
     });
 
   // let's unify the compressed and uncompressed data
-  if (blob->compression_type == pbf_blob::compression::none)
+  if (blob->compression_type == cosm::pbf_blob::compression::none)
   {
     blob->raw_size = static_cast<uint32_t>(blob->data.size());
   }
@@ -495,7 +435,7 @@ struct work_item
   const char* data = nullptr;
   size_t size = 0;
   int32_t raw_size = 0;
-  pbf_blob::compression compression_type;
+  cosm::pbf_blob::compression compression_type;
 };
 
 alignas(64) worker thread_workers[12];
@@ -549,7 +489,7 @@ do_work(int thread_index)
       const char* actual_data = reinterpret_cast<const char*>(wi[i].data);
       size_t actual_data_size = wi[i].size;
 
-      if (wi[i].compression_type == pbf_blob::compression::zlib)
+      if (wi[i].compression_type == cosm::pbf_blob::compression::zlib)
       {
         size_t actual_decompressed_size = decompress_buffer_size;
         libdeflate_result res =
@@ -578,20 +518,20 @@ do_work(int thread_index)
           // primitive_groups
           decode_primitive_groups(
             primitive_groups,
-            [thread_index](entity_state es, cosm::span<const char> data)
+            [thread_index](cosm::entity_state es, cosm::span<const char> data)
             {
               // data contains either dense nodes, ways or
               // relations
               switch (es)
               {
-                case entity_state::nodes:
+                case cosm::entity_state::nodes:
                   count_dense_nodes(&thread_workers[thread_index].counter.nodes,
                                     data);
                   break;
-                case entity_state::ways:
+                case cosm::entity_state::ways:
                   count_ways(&thread_workers[thread_index].counter.ways, data);
                   break;
-                case entity_state::relations:
+                case cosm::entity_state::relations:
                   count_relations(
                     &thread_workers[thread_index].counter.relations, data);
                   break;
@@ -624,7 +564,7 @@ read_data(osm_counter* counter, cosm::span<char> file) noexcept
     return read_data_status::e_decode_file_header;
   }
 
-  pbf_blob blob;
+  cosm::pbf_blob blob;
   if (!decode_header_blob({ p, static_cast<uint64_t>(next_blob_size) }, &blob))
   {
     return read_data_status::e_decode_header_blob;
