@@ -496,8 +496,15 @@ decode_header_blob(cosm::span<const char> blob_data,
   return true;
 }
 
+struct Counter
+{
+  size_t nodes = 0;
+  size_t ways = 0;
+  size_t relations = 0;
+};
+
 static bool
-read_data(cosm::span<char> file) noexcept
+read_data(Counter* counter, cosm::span<char> file) noexcept
 {
   const char* p = file.data();
   [[maybe_unused]] const char* end = file.data() + file.size();
@@ -509,39 +516,20 @@ read_data(cosm::span<char> file) noexcept
   assert(p <= end && "There's at least one header in a file");
   assert(header_size > 0 && "Headers can't be empty");
 
-  printf("Header size = %u\n", header_size);
-
   cosm::span<const char> next_blob_type;
   // the first file header has to contain data about `OSMHeader` (one per file,
   // at start)
   int32_t next_blob_size = 0;
   if (!decode_file_header({ p, header_size }, &next_blob_type, &next_blob_size))
   {
-    puts("E: can't decode file header");
     return false;
   }
-
-  COSM_DEBUG({
-    static char debug_string[1'024];
-    memcpy(debug_string, next_blob_type.data(), next_blob_type.size());
-    debug_string[next_blob_type.size()] = '\0';
-    printf("Next blob type '%s' size = %d\n", debug_string, next_blob_size);
-  });
 
   pbf_blob blob;
   if (!decode_header_blob({ p, static_cast<uint64_t>(next_blob_size) }, &blob))
   {
     return false;
   }
-
-  COSM_DEBUG({
-    printf("Blob of size: %llu (uncompressed: %u) and compression type: %u\n",
-           blob.data.size(),
-           blob.raw_size,
-           static_cast<unsigned>(blob.compression_type));
-    // raw data
-    fwrite(blob.data.data(), 1, blob.data.size(), stdout);
-  });
 
   p += (header_size + next_blob_size);
 
@@ -562,13 +550,6 @@ read_data(cosm::span<char> file) noexcept
   auto free_buffer_out =
     cosm::make_defer([buffer_out]() noexcept { free(buffer_out); });
 
-  // we start with nodes
-  entity_state crt_entity_s = entity_state::nodes;
-  // entity_state prv_entity_s = crt_entity_s;
-  size_t nodes_count = 0;
-  size_t ways_count = 0;
-  size_t relations_count = 0;
-
   while (p < end)
   {
     header_size = cosm::read_network_uint32_unchecked(p);
@@ -577,7 +558,6 @@ read_data(cosm::span<char> file) noexcept
     if (!decode_file_header(
           { p, header_size }, &next_blob_type, &next_blob_size))
     {
-      puts("E: can't decode file header");
       return false;
     }
 
@@ -599,45 +579,42 @@ read_data(cosm::span<char> file) noexcept
 
     if (res != libdeflate_result::LIBDEFLATE_SUCCESS)
     {
-      printf("E: decompress error %d\n", res);
       return false;
     }
 
     if (blob.raw_size && blob.raw_size != actual_decompressed_size)
     {
-      puts("E: invalid actual decompressed size or invalid raw size");
       return false;
     }
 
-    // we now have a PrimitiveGroup inside buffer_out
-    decode_primitive_block({ buffer_out, actual_decompressed_size },
-                           [&nodes_count, &ways_count, &relations_count](
-                             cosm::span<const char> primitive_groups)
-                           {
-                             decode_primitive_groups(
-                               primitive_groups,
-                               [&nodes_count, &ways_count, &relations_count](
-                                 entity_state es, cosm::span<const char> data)
-                               {
-                                 switch (es)
-                                 {
-                                   case entity_state::nodes:
-                                     count_dense_nodes(&nodes_count, data);
-                                     break;
-                                   case entity_state::ways:
-                                     count_ways(&ways_count, data);
-                                     break;
-                                   case entity_state::relations:
-                                     count_relations(&relations_count, data);
-                                     break;
-                                 }
-                               });
-                           });
+    // we now have a PrimitiveBlock inside buffer_out
+    decode_primitive_block(
+      { buffer_out, actual_decompressed_size },
+      [counter](cosm::span<const char> primitive_groups)
+      {
+        // we have a repeated PrimitiveGroup inside
+        // primitive_groups
+        decode_primitive_groups(
+          primitive_groups,
+          [counter](entity_state es, cosm::span<const char> data)
+          {
+            // data contains either dense nodes, ways or
+            // relations
+            switch (es)
+            {
+              case entity_state::nodes:
+                count_dense_nodes(&counter->nodes, data);
+                break;
+              case entity_state::ways:
+                count_ways(&counter->ways, data);
+                break;
+              case entity_state::relations:
+                count_relations(&counter->relations, data);
+                break;
+            }
+          });
+      });
   }
-
-  printf("Total nodes %lu\n", nodes_count);
-  printf("Total ways %lu\n", ways_count);
-  printf("Total relations %lu\n", relations_count);
 
   return true;
 }
@@ -765,13 +742,17 @@ main(int argc, char** argv)
     // end of the mapped file?
   }
 
-  // we now have a mmaped file
-  printf("File size in bytes: %lu\n", mapped_file_size);
-
-  if (!read_data(cosm::span<char>(
-        reinterpret_cast<char*>(global_mapped_file_memory.data()),
-        global_mapped_file_memory.m_size)))
+  Counter counter;
+  if (!read_data(&counter,
+                 cosm::span<char>(
+                   reinterpret_cast<char*>(global_mapped_file_memory.data()),
+                   global_mapped_file_memory.m_size)))
   {
     return error("read_data");
   }
+
+  puts("Stats:");
+  // we now have a mmaped file
+  printf("File size in bytes: %lu\n", mapped_file_size);
+  printf("Nodes: %lu\nWays: %lu\nRelations: %lu\n", counter.nodes, counter.ways, counter.relations);
 }
