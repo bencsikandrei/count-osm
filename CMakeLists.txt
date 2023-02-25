@@ -9,7 +9,7 @@ option(COUNT_OSM_UNIT_TESTS "Enable unit tests" OFF)
 option(COUNT_OSM_INTEGRATION_TESTS "Enable integration tests" OFF)
 option(COUNT_OSM_BENCHMARKS "Enable benchmarks" OFF)
 
-if(NOT UNIX) # this include apple
+if(NOT UNIX) # this includes apple
     message(FATAL_ERROR "Not meant for non *nix")
 endif()
 
@@ -17,8 +17,8 @@ endif()
 add_compile_options(-fno-rtti)
 add_compile_options(-fno-exceptions)
 add_compile_options(-Wall -Wextra -Wpedantic)
+add_compile_options(-Werror)
 add_compile_options(-march=native)
-# add_compile_options(-Werror )
 
 include(CTest)
 
@@ -28,8 +28,6 @@ target_include_directories(count-osm INTERFACE
     $<BUILD_INTERFACE:${CMAKE_CURRENT_LIST_DIR}/src>
     $<INSTALL_INTERFACE:include>)
 add_library(count-osm::count-osm ALIAS count-osm)
-
-# deps
 
 if(COUNT_OSM_UNIT_TESTS)
     enable_testing()
