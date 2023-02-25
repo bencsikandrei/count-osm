@@ -600,7 +600,7 @@ read_data(osm_counter* counter, cosm::span<char> file) noexcept
     p += (header_size + next_blob_size);
 
     {
-      std::lock_guard<std::mutex> l(thread_mutex);
+      std::lock_guard<std::mutex> lk(thread_mutex);
       thread_queue.push(work_item{
         .data = reinterpret_cast<const char*>(blob.data.data()),
         .size = static_cast<uint32_t>(blob.data.size()),
@@ -711,31 +711,20 @@ main(int argc, char** argv)
     void* memory = mmap(nullptr,
                         page_aligned_total_size,
                         PROT_READ | PROT_WRITE,
-                        MAP_PRIVATE | MAP_ANONYMOUS | MAP_HUGETLB,
+                        MAP_PRIVATE | MAP_ANONYMOUS,
                         -1,
                         0);
     if (memory == MAP_FAILED)
     {
-      puts("W: could not allocate huge pages for mmap");
-
-      memory = static_cast<char*>(mmap(nullptr,
-                                       page_aligned_total_size,
-                                       PROT_READ | PROT_WRITE,
-                                       MAP_PRIVATE | MAP_ANONYMOUS,
-                                       -1,
-                                       0));
-      if (memory == MAP_FAILED)
-      {
-        return error("mmap global");
-      }
-
-      global_memory_pool =
-        cosm::span<char>(static_cast<char*>(memory), page_aligned_total_size);
-      global_scratch_memory =
-        cosm::span<char>(static_cast<char*>(memory) + page_aligned_file_size,
-                         page_aligned_scratch_space);
-      global_scratch_memory_start = global_scratch_memory.data();
+      return error("mmap global");
     }
+
+    global_memory_pool =
+      cosm::span<char>(static_cast<char*>(memory), page_aligned_total_size);
+    global_scratch_memory =
+      cosm::span<char>(static_cast<char*>(memory) + page_aligned_file_size,
+                       page_aligned_scratch_space);
+    global_scratch_memory_start = global_scratch_memory.data();
 
     void* mapped_file = mmap(global_memory_pool.data(),
                              page_aligned_file_size,
