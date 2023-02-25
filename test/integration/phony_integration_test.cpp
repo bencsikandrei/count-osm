@@ -3,6 +3,7 @@
 // src
 #include <branch_hints.h>
 #include <defer.h>
+#include <lock_guard.h>
 #include <numbers.h>
 #include <osm_pbf.h>
 #include <protobuf.h>
@@ -556,7 +557,7 @@ read_data(osm_counter* counter, cosm::span<char> file) noexcept
     p += (header_size + next_blob_size);
 
     {
-      std::lock_guard<std::mutex> lk(thread_mutex);
+      cosm::lock_guard<std::mutex> lk(thread_mutex);
       thread_queue.push(work_item{
         .data = reinterpret_cast<const char*>(blob.data.data()),
         .size = static_cast<uint32_t>(blob.data.size()),
@@ -565,7 +566,7 @@ read_data(osm_counter* counter, cosm::span<char> file) noexcept
   }
 
   {
-    std::lock_guard<std::mutex> lck(thread_mutex);
+    cosm::lock_guard<std::mutex> lck(thread_mutex);
     for (int i = 0; i < 48; ++i)
     {
       thread_queue.push(work_item{ .data = nullptr });
