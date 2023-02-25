@@ -28,7 +28,6 @@
 #include <immintrin.h>
 
 // don't want to add STL stuff, but here we go
-#include <condition_variable>
 #include <mutex>
 #include <queue>
 #include <thread>
@@ -191,50 +190,6 @@ fast_count_dense_ids(cosm::span<const char> dense_nodes_id)
   }
 
   return count;
-}
-
-static bool
-count_relations(size_t* relations_count, cosm::span<const char> relations)
-{
-  const char* b = relations.begin();
-  iterate_fields(&b,
-                 relations.end(),
-                 [relations_count](cosm::pbf_field& field) -> bool
-                 {
-                   static constexpr uint32_t relation_id = 1;
-                   switch (field.key)
-                   {
-                     case cosm::protobuf_key(relation_id, cosm::pbf_wt_varint):
-                       ++(*relations_count);
-                       break;
-                     default:
-                       break;
-                   }
-                   return true;
-                 });
-  return true;
-}
-
-static bool
-count_ways(size_t* ways_count, cosm::span<const char> ways)
-{
-  const char* b = ways.begin();
-  iterate_fields(&b,
-                 ways.end(),
-                 [ways_count](cosm::pbf_field& field) -> bool
-                 {
-                   static constexpr uint32_t way_id = 1;
-                   switch (field.key)
-                   {
-                     case cosm::protobuf_key(way_id, cosm::pbf_wt_varint):
-                       ++(*ways_count);
-                       break;
-                     default:
-                       break;
-                   }
-                   return true;
-                 });
-  return true;
 }
 
 static bool
@@ -438,7 +393,6 @@ alignas(64) worker thread_workers[12];
 alignas(64) std::thread thread_threads[12];
 alignas(64) std::queue<work_item> thread_queue;
 alignas(64) std::mutex thread_mutex;
-alignas(64) std::condition_variable thread_cv;
 static constexpr size_t decompress_buffer_size = 8 * 1'024 * 1'024;
 
 void
@@ -514,15 +468,17 @@ do_work(int thread_index)
               switch (es)
               {
                 case cosm::entity_state::nodes:
+                  // nodes are in a dense array
                   count_dense_nodes(&thread_workers[thread_index].counter.nodes,
                                     data);
                   break;
+                  // ways and relations are in length delimited
                 case cosm::entity_state::ways:
-                  count_ways(&thread_workers[thread_index].counter.ways, data);
+                  ++thread_workers[thread_index].counter.ways;
                   break;
+                  // ways and relations are in length delimited
                 case cosm::entity_state::relations:
-                  count_relations(
-                    &thread_workers[thread_index].counter.relations, data);
+                  ++thread_workers[thread_index].counter.relations;
                   break;
               }
             });
@@ -612,7 +568,6 @@ read_data(osm_counter* counter, cosm::span<char> file) noexcept
     std::lock_guard<std::mutex> lck(thread_mutex);
     for (int i = 0; i < 48; ++i)
     {
-      // launch 12 stop tokens
       thread_queue.push(work_item{ .data = nullptr });
     }
   }
