@@ -459,14 +459,6 @@ do_work(int thread_index)
     int actual_work_items = 0;
     {
       std::unique_lock<std::mutex> lck(thread_mutex);
-
-      if (!thread_cv.wait_for(lck,
-                              std::chrono::microseconds(10),
-                              []() { return !thread_queue.empty(); }))
-      {
-        continue;
-      }
-
       while (!thread_queue.empty() && actual_work_items < max_wi_per_pop)
       {
         wi[actual_work_items++] = thread_queue.front();
@@ -614,7 +606,6 @@ read_data(osm_counter* counter, cosm::span<char> file) noexcept
         .size = static_cast<uint32_t>(blob.data.size()),
         .compression_type = static_cast<uint32_t>(blob.compression_type) });
     }
-    thread_cv.notify_one();
   }
 
   {
@@ -624,11 +615,6 @@ read_data(osm_counter* counter, cosm::span<char> file) noexcept
       // launch 12 stop tokens
       thread_queue.push(work_item{ .data = nullptr });
     }
-  }
-
-  for (int i = 0; i < 48; ++i)
-  {
-    thread_cv.notify_one();
   }
 
   for (auto& t : thread_threads)
