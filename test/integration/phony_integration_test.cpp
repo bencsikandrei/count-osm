@@ -113,9 +113,9 @@ read_field(cosm::pbf_field* __restrict__ field,
   return true;
 }
 
-template<typename Callback>
+template<typename callback_t>
 static bool
-iterate_fields(const char** begin, const char* end, Callback&& cb) noexcept
+iterate_fields(const char** begin, const char* end, callback_t&& cb) noexcept
 {
   assert(begin && "Pass valid values for begin");
   assert(end && "Pass valid values for end");
@@ -202,23 +202,20 @@ count_dense_nodes(size_t* nodes_count, cosm::span<const char> dense_nodes)
     dense_nodes.end(),
     [nodes_count](cosm::pbf_field& field) -> bool
     {
-      // TODO: do we need the 'nodes' field? id = 0;
       static constexpr uint32_t dense_nodes_id = 1;
-      switch (field.key)
+      if (field.key ==
+          cosm::protobuf_key(dense_nodes_id, cosm::pbf_wt_length_delim))
       {
-        case cosm::protobuf_key(dense_nodes_id, cosm::pbf_wt_length_delim):
-          *nodes_count += fast_count_dense_ids(field.data.length_delim);
-          break;
-        default:
-          break;
+        *nodes_count += fast_count_dense_ids(field.data.length_delim);
       }
       return true;
     });
 }
 
-template<typename Callback>
+template<typename callback_t>
 static bool
-decode_primitive_groups(cosm::span<const char> primitive_groups, Callback&& cb)
+decode_primitive_groups(cosm::span<const char> primitive_groups,
+                        callback_t&& cb)
 {
   const char* b = primitive_groups.begin();
   return iterate_fields(
@@ -226,8 +223,7 @@ decode_primitive_groups(cosm::span<const char> primitive_groups, Callback&& cb)
     primitive_groups.end(),
     [&cb](cosm::pbf_field& field) -> bool
     {
-      // static constexpr uint32_t primitivegroup_nodes = 1; //
-      // TODO
+      // TODO: do we need the 'nodes' field = 1?
       static constexpr uint32_t primitivegroup_dense_nodes = 2;
       static constexpr uint32_t primitivegroup_ways = 3;
       static constexpr uint32_t primitivegroup_relations = 4;
@@ -251,10 +247,10 @@ decode_primitive_groups(cosm::span<const char> primitive_groups, Callback&& cb)
     });
 }
 
-template<typename Callback>
+template<typename callback_t>
 static bool
 decode_primitive_block(cosm::span<const char> primitive_block,
-                       Callback&& cb) noexcept
+                       callback_t&& cb) noexcept
 {
   const char* b = primitive_block.begin();
   return iterate_fields(
@@ -263,14 +259,10 @@ decode_primitive_block(cosm::span<const char> primitive_block,
     [&cb](cosm::pbf_field& field) -> bool
     {
       static constexpr uint32_t primitiveblock_primitivegroup = 2;
-      switch (field.key)
+      if (field.key == cosm::protobuf_key(primitiveblock_primitivegroup,
+                                          cosm::pbf_wt_length_delim))
       {
-        case cosm::protobuf_key(primitiveblock_primitivegroup,
-                                cosm::pbf_wt_length_delim):
-          cb(field.data.length_delim);
-          break;
-        default:
-          break;
+        cb(field.data.length_delim);
       }
       return true;
     });
