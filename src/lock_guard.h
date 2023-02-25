@@ -15,7 +15,7 @@ struct [[nodiscard]] lock_guard
    * @brief Lock the mutex
    * @param m mutex to lock
    */
-  lock_guard(mutex_t& m) noexcept
+  explicit lock_guard(mutex_t& m) noexcept
     : mutex(m)
   {
     mutex.lock();
@@ -25,6 +25,9 @@ struct [[nodiscard]] lock_guard
    * @brief Unlocks mutex
    */
   ~lock_guard() noexcept { mutex.unlock(); }
+
+  lock_guard(lock_guard const&) = delete;
+  lock_guard& operator=(lock_guard const&) = delete;
 
   mutex_t& mutex;
 };

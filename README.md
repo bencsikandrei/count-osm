@@ -7,7 +7,7 @@ Minimal dependency, fast to compile and fast to run OSM entities counter (nodes,
 * g++11/clang-13 or higher
 * cmake 3.22 or higher
 * make or ninja
-* (optional) conan - does help a lot
+* (optional) conan - helps a lot
 
 ## How to configure
 
@@ -40,4 +40,14 @@ cmake -S. -Bbuild/gcc-11-Release -DCMAKE_BUILD_TYPE=Release
 cmake -S. -Bbuild/gcc-11-Release -DCMAKE_BUILD_TYPE=Release
     -DCOUNT_OSM_BENCHMARKS=ON
 ```
+
+## Credits
+
+Inspired by the amazing work of Stefan Karschti: https://github.com/stefankarschti/inputosm
+
+Tricks from:
+
+https://github.com/facebook/folly
+
+https://github.com/mapbox/protozero
 
