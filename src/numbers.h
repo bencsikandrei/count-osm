@@ -25,6 +25,23 @@ struct varint_result
   varint_status sts;
 };
 
+/**
+ * @brief Very basic atoi function
+ * @note does not support negative numbers
+ * @param str to parse
+ * @return value or 0
+*/
+int
+atoi(const char* str) noexcept
+{
+  int res = 0;
+  for (int i = 0; str[i] != '\0'; ++i)
+  {
+    res = res * 10 + str[i] - '0';
+  }
+  return res;
+}
+
 inline varint_result<uint64_t>
 decode_varint_u64(const char** __restrict__ begin, const char* __restrict__ end)
 {

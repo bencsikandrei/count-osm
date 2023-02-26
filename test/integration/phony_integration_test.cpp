@@ -1,13 +1,17 @@
 #include <count-osm/count-osm.h>
 
 // src
+#include <allocator.h>
 #include <branch_hints.h>
 #include <defer.h>
 #include <lock_guard.h>
+#include <move.h>
+#include <mutex.h>
 #include <numbers.h>
 #include <osm_pbf.h>
 #include <protobuf.h>
 #include <span.h>
+#include <thread.h>
 
 // third party
 #include <libdeflate.h>
@@ -29,7 +33,6 @@
 #include <immintrin.h>
 
 // don't want to add STL stuff, but here we go
-#include <mutex>
 #include <queue>
 #include <thread>
 
@@ -328,7 +331,10 @@ enum class read_data_status
   e_decode_data_file_header,
   e_decode_data_header_blob,
   e_decompress_data_blob,
-  e_decompress_unuexpected_size
+  e_decompress_unuexpected_size,
+  e_not_enough_memory,
+  e_thread_creation_failed,
+  e_thread_join_failed
 };
 
 constexpr const char*
@@ -354,21 +360,26 @@ read_data_status_string(read_data_status sts) noexcept
       return "e_decompress_data_blob";
     case read_data_status::e_decompress_unuexpected_size:
       return "e_decompress_unuexpected_size";
+    case read_data_status::e_not_enough_memory:
+      return "e_not_enough_memory";
+    case read_data_status::e_thread_creation_failed:
+      return "e_thread_creation_failed";
+    case read_data_status::e_thread_join_failed:
+      return "e_thread_join_failed";
   }
   return "unknown error!";
 }
 
 struct alignas(64) worker
 {
-  ~worker() noexcept
-  {
-    free(buffer);
-    buffer = nullptr;
-  }
-
-  char* buffer = nullptr;
-  osm_counter counter;
+  int thread_index = 0;
+  cosm::thread thread;
+  libdeflate_decompressor* thread_decompressor = nullptr;
+  char* thread_buffer = nullptr;
+  osm_counter thread_counter;
 };
+
+static_assert(sizeof(worker) == 64);
 
 struct work_item
 {
@@ -385,19 +396,23 @@ static_assert(sizeof(work_item) == 16);
 alignas(64) worker thread_workers[12];
 alignas(64) std::thread thread_threads[12];
 alignas(64) std::queue<work_item> thread_queue;
-alignas(64) std::mutex thread_mutex;
+alignas(64) cosm::mutex thread_mutex;
 static constexpr size_t decompress_buffer_size = 8 * 1'024 * 1'024;
 
-void
-do_work(int thread_index)
+void*
+do_work(void* arg)
 {
-  libdeflate_decompressor* dec = libdeflate_alloc_decompressor();
-  if (!dec)
-  {
-    return;
-  }
+  worker* w = static_cast<worker*>(arg);
+
+  // ALL worker fields are initialized before this call!
+
+  // the only thing that the thread owns is the decompressor, we must free it
   auto free_decompressor = cosm::make_defer(
-    [dec, thread_index]() noexcept { libdeflate_free_decompressor(dec); });
+    [w]() noexcept
+    {
+      libdeflate_free_decompressor(w->thread_decompressor);
+      w->thread_decompressor = nullptr;
+    });
 
   constexpr int max_wi_per_pop = 4;
   while (true)
@@ -405,7 +420,7 @@ do_work(int thread_index)
     work_item wi[max_wi_per_pop];
     int actual_work_items = 0;
     {
-      std::unique_lock<std::mutex> lck(thread_mutex);
+      cosm::lock_guard<cosm::mutex> lck(thread_mutex);
       while (!thread_queue.empty() && actual_work_items < max_wi_per_pop)
       {
         wi[actual_work_items++] = thread_queue.front();
@@ -418,7 +433,7 @@ do_work(int thread_index)
       if (wi[i].data == nullptr)
       {
         // stop token
-        return;
+        return arg;
       }
 
       const char* actual_data = reinterpret_cast<const char*>(wi[i].data);
@@ -429,32 +444,32 @@ do_work(int thread_index)
       {
         size_t actual_decompressed_size = decompress_buffer_size;
         libdeflate_result res =
-          libdeflate_zlib_decompress(dec,
+          libdeflate_zlib_decompress(w->thread_decompressor,
                                      actual_data,
                                      actual_data_size,
-                                     thread_workers[thread_index].buffer,
+                                     w->thread_buffer,
                                      actual_decompressed_size,
                                      &actual_decompressed_size);
 
         if (res != libdeflate_result::LIBDEFLATE_SUCCESS)
         {
-          return;
+          return arg;
         }
 
-        actual_data = thread_workers[thread_index].buffer;
+        actual_data = w->thread_buffer;
         actual_data_size = actual_decompressed_size;
       }
 
       // we now have a PrimitiveBlock inside buffer_out
       decode_primitive_block(
         { actual_data, actual_data_size },
-        [thread_index](cosm::span<const char> primitive_groups)
+        [w](cosm::span<const char> primitive_groups)
         {
           // we have a repeated PrimitiveGroup inside
           // primitive_groups
           decode_primitive_groups(
             primitive_groups,
-            [thread_index](cosm::entity_state es, cosm::span<const char> data)
+            [w](cosm::entity_state es, cosm::span<const char> data)
             {
               // data contains either dense nodes, ways or
               // relations
@@ -462,26 +477,32 @@ do_work(int thread_index)
               {
                 case cosm::entity_state::nodes:
                   // nodes are in a dense array
-                  count_dense_nodes(&thread_workers[thread_index].counter.nodes,
-                                    data);
+                  count_dense_nodes(&w->thread_counter.nodes, data);
                   break;
                   // ways and relations are in length delimited
                 case cosm::entity_state::ways:
-                  ++thread_workers[thread_index].counter.ways;
+                  ++(w->thread_counter.ways);
                   break;
                   // ways and relations are in length delimited
                 case cosm::entity_state::relations:
-                  ++thread_workers[thread_index].counter.relations;
+                  ++(w->thread_counter.relations);
                   break;
               }
             });
         });
     }
   }
+
+  return arg;
 }
 
+static constexpr int k_threads_max = 128;
+
 static read_data_status
-read_data(osm_counter* counter, cosm::span<char> file) noexcept
+read_data(osm_counter* counter,
+          cosm::span<char> file,
+          int number_of_threads,
+          cosm::bump_allocator allocator) noexcept
 {
   const char* p = file.data();
   [[maybe_unused]] const char* end = file.data() + file.size();
@@ -510,24 +531,47 @@ read_data(osm_counter* counter, cosm::span<char> file) noexcept
 
   p += (header_size + next_blob_size);
 
-  // after the first `OSMHeader` we will get only `OSMData`
-  // every entity is inside a so called `blob` which is also pbf encoded (see
-  // fileformat.proto
+  const int number_of_threads_adjusted =
+    number_of_threads < 1
+      ? 1
+      : (number_of_threads > k_threads_max ? k_threads_max : number_of_threads);
 
-  for (worker& w : thread_workers)
+  // we allocate max threads, even if we don't use that much
+  worker* workers = allocator.allocate<worker>(k_threads_max, 64);
+  if (!workers)
   {
-    w.buffer = static_cast<char*>(aligned_alloc(64, decompress_buffer_size));
-    if (!w.buffer)
+    return read_data_status::e_not_enough_memory;
+  }
+
+  // TODO: find a way to use mmaped area for libdeflate also
+  // libdeflate_set_memory_allocator(void *(*malloc_func)(size_t),
+  // 			void (*free_func)(void *));
+
+  // TODO: make sure we cleanup
+  for (int i = 0; i < number_of_threads_adjusted; ++i)
+  {
+    workers[i].thread_index = i;
+    workers[i].thread_buffer =
+      static_cast<char*>(allocator.allocate_raw(decompress_buffer_size, 64));
+    if (!workers[i].thread_buffer)
     {
       return read_data_status::e_buffer_allocation;
     }
+    if (workers[i].thread.start(&do_work, &workers[i]))
+    {
+      return read_data_status::e_thread_creation_failed;
+    }
+    workers[i].thread_decompressor = libdeflate_alloc_decompressor();
+    if (!workers[i].thread_decompressor)
+    {
+      // each thread owns its own decompressor and frees it when done
+      return read_data_status::e_decompress_create;
+    }
   }
 
-  int thread_index = 0;
-  for (std::thread& t : thread_threads)
-  {
-    t = std::thread(do_work, thread_index++);
-  }
+  // after the first `OSMHeader` we will get only `OSMData`
+  // every entity is inside a so called `blob` which is also
+  // pbf encoded (see fileformat.proto
 
   while (p < end)
   {
@@ -549,7 +593,7 @@ read_data(osm_counter* counter, cosm::span<char> file) noexcept
     p += (header_size + next_blob_size);
 
     {
-      cosm::lock_guard<std::mutex> lk(thread_mutex);
+      cosm::lock_guard<cosm::mutex> lk(thread_mutex);
       thread_queue.push(work_item{
         .data = reinterpret_cast<const char*>(blob.data.data()),
         .size = static_cast<uint32_t>(blob.data.size()),
@@ -558,26 +602,26 @@ read_data(osm_counter* counter, cosm::span<char> file) noexcept
   }
 
   {
-    cosm::lock_guard<std::mutex> lck(thread_mutex);
-    for (int i = 0; i < 48; ++i)
+    cosm::lock_guard<cosm::mutex> lck(thread_mutex);
+    for (int i = 0; i < number_of_threads_adjusted * 4; ++i)
     {
       thread_queue.push(work_item{ .data = nullptr });
     }
   }
 
-  for (auto& t : thread_threads)
+  for (int i = 0; i < number_of_threads_adjusted; ++i)
   {
-    if (t.joinable())
+    if (workers[i].thread.joinable())
     {
-      t.join();
+      if (workers[i].thread.join())
+      {
+        return read_data_status::e_thread_join_failed;
+        // should abort?
+      }
     }
-  }
-
-  for (auto& w : thread_workers)
-  {
-    counter->nodes += w.counter.nodes;
-    counter->ways += w.counter.ways;
-    counter->relations += w.counter.relations;
+    counter->nodes += workers[i].thread_counter.nodes;
+    counter->ways += workers[i].thread_counter.ways;
+    counter->relations += workers[i].thread_counter.relations;
   }
 
   return read_data_status::ok;
@@ -586,19 +630,8 @@ read_data(osm_counter* counter, cosm::span<char> file) noexcept
 // we only allocate memory once, for the whole program, then we use this
 // pointer to get chunks
 cosm::span<char> global_memory_pool;
-cosm::span<char> global_scratch_memory;
 cosm::span<char> global_mapped_file_memory;
 char* global_scratch_memory_start = nullptr;
-
-template<size_t Alignment = 8>
-[[nodiscard]] char*
-global_alloc(size_t size) noexcept
-{
-  const size_t aligned_size = (size + Alignment - 1) & ~(Alignment - 1);
-  char* chunk = global_memory_pool;
-  global_scratch_memory_start += aligned_size;
-  return chunk;
-}
 
 // let's try to use huge pages first (linux says 2MB)
 constexpr size_t huge_page_size = 2ul * 1'024ul * 1'024ul;
@@ -618,6 +651,25 @@ main(int argc, char** argv)
     return 1;
   }
 
+  int user_defined_number_of_threads = cosm::thread_get_hardware_concurrency();
+  if (argc >= 3)
+  {
+    int temporary = cosm::atoi(argv[2]);
+    if (temporary >= 1)
+    {
+      user_defined_number_of_threads = temporary;
+      printf("Using %d/%ld threads, as specified by the user\n",
+             user_defined_number_of_threads,
+             cosm::thread_get_hardware_concurrency());
+    }
+  }
+  else
+  {
+    printf("Using %d/%d threads\n",
+           user_defined_number_of_threads,
+           user_defined_number_of_threads);
+  }
+
   auto defer_unmap = cosm::make_defer(
     []() noexcept
     {
@@ -628,6 +680,9 @@ main(int argc, char** argv)
     });
 
   size_t mapped_file_size = 0;
+
+  void* scratch_memory_start = nullptr;
+  size_t scratch_memory_size = 0;
 
   {
     int fd = open(argv[1], O_RDONLY);
@@ -669,10 +724,9 @@ main(int argc, char** argv)
 
     global_memory_pool =
       cosm::span<char>(static_cast<char*>(memory), page_aligned_total_size);
-    global_scratch_memory =
-      cosm::span<char>(static_cast<char*>(memory) + page_aligned_file_size,
-                       page_aligned_scratch_space);
-    global_scratch_memory_start = global_scratch_memory.data();
+
+    scratch_memory_start = static_cast<char*>(memory) + page_aligned_file_size;
+    scratch_memory_size = page_aligned_scratch_space;
 
     void* mapped_file = mmap(global_memory_pool.data(),
                              page_aligned_file_size,
@@ -694,12 +748,16 @@ main(int argc, char** argv)
     // end of the mapped file?
   }
 
+  cosm::bump_allocator allocator(scratch_memory_start, scratch_memory_size);
+
   osm_counter counter;
   if (const read_data_status sts =
         read_data(&counter,
                   cosm::span<char>(
                     reinterpret_cast<char*>(global_mapped_file_memory.data()),
-                    global_mapped_file_memory.m_size));
+                    global_mapped_file_memory.m_size),
+                  user_defined_number_of_threads,
+                  cosm::move(allocator));
       sts != read_data_status::ok)
   {
     printf("E: %s\n", read_data_status_string(sts));
