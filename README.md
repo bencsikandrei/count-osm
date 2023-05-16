@@ -2,6 +2,11 @@
 
 Minimal dependency, fast to compile and fast to run OSM entities counter (nodes, ways, relations).
 
+## NOTE
+
+For now, and until I have some time to move the code from there, the actual usage is under `test`.
+There is only a phony file in the include dir. All the magic happens in test.
+
 ## Requires
 
 * g++11/clang-13 or higher
